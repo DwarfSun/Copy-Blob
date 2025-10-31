@@ -143,11 +143,14 @@ namespace Copy_Blob
 
                     string downloadedStr = FormatBytes(totalRead);
                     string totalStr = FormatBytes(blobLength);
+                    string etaStr = eta.TotalDays >= 1
+                        ? $"{(int)eta.TotalDays}d {eta.Hours:00}:{eta.Minutes:00}:{eta.Seconds:00}"
+                        : eta.ToString(@"hh\:mm\:ss");
 
                     // Update every 0.5s or on completion
                     if ((now - lastReportTime).TotalSeconds > 0.5 || totalRead == blobLength)
                     {
-                        Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {eta:hh\\:mm\\:ss}   ");
+                        Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   ");
                         lastReportTime = now;
                         lastReportBytes = totalRead;
                     }
