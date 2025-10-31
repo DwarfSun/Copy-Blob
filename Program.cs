@@ -7,15 +7,15 @@ using Azure.Identity;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace CopyTool
+namespace Copy_Blob
 {
     class Program
     {
         static async Task<int> Main(string[] args)
         {
-            if (args.Length < 4)
+            if (args.Length < 2)
             {
-                Console.WriteLine("Usage: CopyTool --blob-url <url> --local-path <path> [--account-key <key>]");
+                Console.WriteLine("Usage: Copy-Blob --blob-url <url> [--local-path <path> --account-key <key>]");
                 return 1;
             }
 
@@ -33,9 +33,11 @@ namespace CopyTool
                     accountKey = args[++i];
             }
 
-            if (string.IsNullOrEmpty(blobUrl) || string.IsNullOrEmpty(localPath))
+            if  (string.IsNullOrEmpty(localPath)) localPath = Directory.GetCurrentDirectory();
+
+            if (string.IsNullOrEmpty(blobUrl))
             {
-                Console.WriteLine("Both --blob-url and --local-path are required.");
+                Console.WriteLine("--blob-url is required.");
                 return 1;
             }
 
