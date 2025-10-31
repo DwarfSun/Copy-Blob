@@ -53,3 +53,5 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 restore.sql
+
+*.ai.slop
