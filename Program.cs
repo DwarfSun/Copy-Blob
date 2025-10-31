@@ -6,11 +6,18 @@ using Azure.Storage.Blobs.Specialized;
 using Azure.Identity;
 using System.IO;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 namespace Copy_Blob
 {
-    class Program
+    partial class Program
     {
+        // Prevent sleep during download
+        [LibraryImport("kernel32.dll")]
+        internal static partial uint SetThreadExecutionState(uint esFlags);
+        const uint ES_CONTINUOUS = 0x80000000;
+        const uint ES_SYSTEM_REQUIRED = 0x00000001;
+        const uint ES_AWAYMODE_REQUIRED = 0x00000040; // For media apps
         // Helper to format bytes in largest unit
         static string FormatBytes(double bytes)
         {
@@ -101,6 +108,9 @@ namespace Copy_Blob
 
         static async Task DownloadBlobWithResume(string blobUrl, string localPath, string? accountKey, int threads)
         {
+            // Prevent sleep
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+
             BlobClient blobClient;
             if (!string.IsNullOrEmpty(accountKey))
             {
@@ -155,6 +165,7 @@ namespace Copy_Blob
 
             var tasks = new List<Task>();
             var throttler = new System.Threading.SemaphoreSlim(threads);
+            object fileLock = new object();
 
             // Status update loop (runs independently)
             var statusTask = Task.Run(async () =>
@@ -183,47 +194,65 @@ namespace Copy_Blob
                 }
             });
 
-            // Download chunks in parallel
-            for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
+            // Open the file once for all chunk writes
+            using (var fs = new FileStream(localPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Write))
             {
-                if (chunkDone[chunkIndex]) continue;
-                await throttler.WaitAsync();
-                tasks.Add(Task.Run(async () =>
+                for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
                 {
-                    try
+                    if (chunkDone[chunkIndex]) continue;
+                    long offset = chunkIndex * chunkSize;
+                    long length = Math.Min(chunkSize, blobLength - offset);
+                    if (length <= 0) continue;
+                    await throttler.WaitAsync();
+                    tasks.Add(Task.Run(async () =>
                     {
-                        long offset = chunkIndex * chunkSize;
-                        long length = Math.Min(chunkSize, blobLength - offset);
-                        var options = new Azure.Storage.Blobs.Models.BlobDownloadOptions
+                        try
                         {
-                            Range = new Azure.HttpRange(offset, length)
-                        };
-                        var downloadResponse = await blobClient.DownloadStreamingAsync(options);
-                        using (var chunkStream = downloadResponse.Value.Content)
-                        using (var fs = new FileStream(localPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Write))
-                        {
-                            fs.Seek(offset, SeekOrigin.Begin);
-                            byte[] buffer = new byte[81920];
-                            int read;
-                            long chunkRead = 0;
-                            while ((read = await chunkStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                            var options = new Azure.Storage.Blobs.Models.BlobDownloadOptions
                             {
-                                await fs.WriteAsync(buffer, 0, read);
-                                chunkRead += read;
-                                progress[chunkIndex] = chunkRead;
+                                Range = new Azure.HttpRange(offset, length)
+                            };
+                            var downloadResponse = await blobClient.DownloadStreamingAsync(options);
+                            using (var chunkStream = downloadResponse.Value.Content)
+                            {
+                                byte[] buffer = new byte[81920];
+                                int read;
+                                long chunkRead = 0;
+                                while ((read = await chunkStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                                {
+                                    lock (fileLock)
+                                    {
+                                        fs.Seek(offset + chunkRead, SeekOrigin.Begin);
+                                        fs.Write(buffer, 0, read);
+                                    }
+                                    chunkRead += read;
+                                    progress[chunkIndex] = chunkRead;
+                                }
                             }
                         }
-                    }
-                    finally
-                    {
-                        throttler.Release();
-                    }
-                }));
+                        finally
+                        {
+                            throttler.Release();
+                        }
+                    }));
+                }
+
+                await Task.WhenAll(tasks);
             }
 
             await Task.WhenAll(tasks);
-            await statusTask;
+            // After all tasks, ensure status loop exits and final progress is shown
+            long finalDownloaded = new FileInfo(localPath).Length;
+            // Wait for status loop to show final state
+            while (true)
+            {
+                if (finalDownloaded >= blobLength) break;
+                await Task.Delay(100);
+                finalDownloaded = new FileInfo(localPath).Length;
+            }
             Console.WriteLine("\nDownload complete.");
+            // Restore normal sleep behavior
+            _ = SetThreadExecutionState(ES_CONTINUOUS);
         }
     }
 }
