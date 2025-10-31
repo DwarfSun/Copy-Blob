@@ -11,6 +11,18 @@ namespace Copy_Blob
 {
     class Program
     {
+        // Helper to format bytes in largest unit
+        static string FormatBytes(double bytes)
+        {
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
+            int unitIndex = 0;
+            while (unitIndex < units.Length - 1 && bytes >= 1024)
+            {
+                bytes /= 1024.0;
+                unitIndex++;
+            }
+            return $"{bytes:F2} {units[unitIndex]}";
+        }
         static async Task<int> Main(string[] args)
         {
             if (args.Length < 2)
@@ -126,15 +138,16 @@ namespace Copy_Blob
                     var now = DateTime.UtcNow;
                     var elapsed = now - startTime;
                     var percent = (double)totalRead / blobLength * 100.0;
-                    var mbDownloaded = totalRead / (1024.0 * 1024.0);
-                    var mbTotal = blobLength / (1024.0 * 1024.0);
                     var speed = totalRead / 1024.0 / 1024.0 / elapsed.TotalSeconds; // MB/s
                     var eta = speed > 0 ? TimeSpan.FromSeconds((blobLength - totalRead) / 1024.0 / 1024.0 / speed) : TimeSpan.Zero;
+
+                    string downloadedStr = FormatBytes(totalRead);
+                    string totalStr = FormatBytes(blobLength);
 
                     // Update every 0.5s or on completion
                     if ((now - lastReportTime).TotalSeconds > 0.5 || totalRead == blobLength)
                     {
-                        Console.Write($"\rDownloaded: {mbDownloaded:F2}/{mbTotal:F2} MB | {percent:F2}% | Speed: {speed:F2} MB/s | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {eta:hh\\:mm\\:ss}   ");
+                        Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {eta:hh\\:mm\\:ss}   ");
                         lastReportTime = now;
                         lastReportBytes = totalRead;
                     }
