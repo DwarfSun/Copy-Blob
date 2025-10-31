@@ -185,7 +185,7 @@ namespace Copy_Blob
                         ? $"{(int)eta.TotalDays}d {eta.Hours:00}:{eta.Minutes:00}:{eta.Seconds:00}"
                         : eta.ToString(@"hh\:mm\:ss");
 
-                    Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Threads: {threads} | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   ");
+                    Console.Write($"\rDownloaded: {downloadedStr} of {totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Threads: {threads} | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   ");
 
                     if (downloaded >= blobLength)
                         break;
@@ -241,16 +241,14 @@ namespace Copy_Blob
             }
 
             await Task.WhenAll(tasks);
-            // After all tasks, ensure status loop exits and final progress is shown
+            // Print final status line (100%) before exiting
             long finalDownloaded = new FileInfo(localPath).Length;
-            // Wait for status loop to show final state
-            while (true)
-            {
-                if (finalDownloaded >= blobLength) break;
-                await Task.Delay(100);
-                finalDownloaded = new FileInfo(localPath).Length;
-            }
-            Console.WriteLine("\nDownload complete.");
+            var elapsed = DateTime.UtcNow - startTime;
+            string downloadedStr = FormatBytes(finalDownloaded);
+            string totalStr = FormatBytes(blobLength);
+            string etaStr = "00:00:00";
+            Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | 100.00% | Speed: N/A | Threads: {threads} | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   \n");
+            Console.WriteLine("Download complete.");
             // Restore normal sleep behavior
             _ = SetThreadExecutionState(ES_CONTINUOUS);
         }
