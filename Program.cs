@@ -6,22 +6,15 @@ using Azure.Storage.Blobs.Specialized;
 using Azure.Identity;
 using System.IO;
 using System.Threading.Tasks;
-using System.Runtime.InteropServices;
 
 namespace Copy_Blob
 {
-    partial class Program
+    class Program
     {
-        // Prevent sleep during download
-        [LibraryImport("kernel32.dll")]
-        internal static partial uint SetThreadExecutionState(uint esFlags);
-        const uint ES_CONTINUOUS = 0x80000000;
-        const uint ES_SYSTEM_REQUIRED = 0x00000001;
-        const uint ES_AWAYMODE_REQUIRED = 0x00000040; // For media apps
         // Helper to format bytes in largest unit
         static string FormatBytes(double bytes)
         {
-            string[] units = ["B", "KB", "MB", "GB", "TB"];
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
             int unitIndex = 0;
             while (unitIndex < units.Length - 1 && bytes >= 1024)
             {
@@ -34,15 +27,13 @@ namespace Copy_Blob
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: Copy-Blob --blob-url <url> [--threads <num|max> --local-path <path> --account-key <key>]");
+                Console.WriteLine("Usage: Copy-Blob --blob-url <url> [--local-path <path> --account-key <key>]");
                 return 1;
             }
 
             string? blobUrl = null;
             string? localPath = null;
             string? accountKey = null;
-            int threads = 1;
-            bool autoThreads = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -52,24 +43,6 @@ namespace Copy_Blob
                     localPath = args[++i];
                 else if (args[i] == "--account-key" && i + 1 < args.Length)
                     accountKey = args[++i];
-                else if (args[i] == "--threads" && i + 1 < args.Length)
-                {
-                    var val = args[++i];
-                    if (val.Equals("max", StringComparison.CurrentCultureIgnoreCase))
-                    {
-                        autoThreads = true;
-                    }
-                    else if (int.TryParse(val, out int t) && t > 0)
-                    {
-                        threads = t;
-                    }
-                }
-            }
-
-            if (autoThreads)
-            {
-                // Use processor count, but cap at 8 for safety
-                threads = Math.Min(Environment.ProcessorCount, 8);
             }
 
             if  (string.IsNullOrEmpty(localPath)) localPath = Directory.GetCurrentDirectory();
@@ -102,18 +75,16 @@ namespace Copy_Blob
                 }
             }
 
-            await DownloadBlobWithResume(blobUrl, localPath, accountKey, threads);
+            await DownloadBlobWithResume(blobUrl, localPath, accountKey);
             return 0;
         }
 
-        static async Task DownloadBlobWithResume(string blobUrl, string localPath, string? accountKey, int threads)
+        static async Task DownloadBlobWithResume(string blobUrl, string localPath, string? accountKey)
         {
-            // Prevent sleep
-            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
-
             BlobClient blobClient;
             if (!string.IsNullOrEmpty(accountKey))
             {
+                // Use account key authentication
                 var blobUri = new Uri(blobUrl);
                 var accountName = blobUri.Host.Split('.')[0];
                 var credential = new Azure.Storage.StorageSharedKeyCredential(accountName, accountKey);
@@ -121,6 +92,7 @@ namespace Copy_Blob
             }
             else
             {
+                // Use DefaultAzureCredential (MS Entra ID)
                 var blobUri = new Uri(blobUrl);
                 var credential = new DefaultAzureCredential();
                 blobClient = new BlobClient(blobUri, credential);
@@ -141,116 +113,50 @@ namespace Copy_Blob
                 return;
             }
 
-            const int chunkSize = 4 * 1024 * 1024; // 4 MB per chunk
-            int totalChunks = (int)Math.Ceiling((double)blobLength / chunkSize);
-
-            // Track which chunks are already downloaded
-            bool[] chunkDone = new bool[totalChunks];
-            long totalRead = existingLength;
-            if (existingLength > 0)
+            var options = new Azure.Storage.Blobs.Models.BlobDownloadOptions
             {
-                // Mark completed chunks
-                for (int i = 0; i < totalChunks; i++)
-                {
-                    long chunkStart = i * chunkSize;
-                    long chunkEnd = Math.Min(chunkStart + chunkSize, blobLength);
-                    if (existingLength >= chunkEnd)
-                        chunkDone[i] = true;
-                }
-            }
+                Range = new Azure.HttpRange(existingLength)
+            };
+            var downloadResponse = await blobClient.DownloadStreamingAsync(options);
 
-            var progress = new System.Collections.Concurrent.ConcurrentDictionary<int, long>();
+            const int bufferSize = 81920; // 80 KB
+            byte[] buffer = new byte[bufferSize];
+            long totalRead = existingLength;
+            var stream = downloadResponse.Value.Content;
             var startTime = DateTime.UtcNow;
             var lastReportTime = startTime;
+            long lastReportBytes = totalRead;
 
-            var tasks = new List<Task>();
-            var throttler = new System.Threading.SemaphoreSlim(threads);
-            object fileLock = new object();
-
-            // Status update loop (runs independently)
-            var statusTask = Task.Run(async () =>
+            using (var fileStream = new FileStream(localPath, FileMode.Append, FileAccess.Write))
             {
-                while (true)
+                int read;
+                while ((read = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
                 {
-                    long downloaded = existingLength + progress.Values.Sum();
+                    await fileStream.WriteAsync(buffer, 0, read);
+                    totalRead += read;
+
                     var now = DateTime.UtcNow;
                     var elapsed = now - startTime;
-                    var percent = (double)downloaded / blobLength * 100.0;
-                    var speed = (downloaded - existingLength) / 1024.0 / 1024.0 / elapsed.TotalSeconds; // MB/s
-                    var eta = speed > 0 ? TimeSpan.FromSeconds((blobLength - downloaded) / 1024.0 / 1024.0 / speed) : TimeSpan.Zero;
+                    var percent = (double)totalRead / blobLength * 100.0;
+                    var speed = totalRead / 1024.0 / 1024.0 / elapsed.TotalSeconds; // MB/s
+                    var eta = speed > 0 ? TimeSpan.FromSeconds((blobLength - totalRead) / 1024.0 / 1024.0 / speed) : TimeSpan.Zero;
 
-                    string downloadedStr = FormatBytes(downloaded);
+                    string downloadedStr = FormatBytes(totalRead);
                     string totalStr = FormatBytes(blobLength);
                     string etaStr = eta.TotalDays >= 1
                         ? $"{(int)eta.TotalDays}d {eta.Hours:00}:{eta.Minutes:00}:{eta.Seconds:00}"
                         : eta.ToString(@"hh\:mm\:ss");
 
-                    Console.Write($"\rDownloaded: {downloadedStr} of {totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Threads: {threads} | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   ");
-
-                    if (downloaded >= blobLength)
-                        break;
-
-                    await Task.Delay(500);
-                }
-            });
-
-            // Open the file once for all chunk writes
-            using (var fs = new FileStream(localPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Write))
-            {
-                for (int chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++)
-                {
-                    if (chunkDone[chunkIndex]) continue;
-                    long offset = chunkIndex * chunkSize;
-                    long length = Math.Min(chunkSize, blobLength - offset);
-                    if (length <= 0) continue;
-                    await throttler.WaitAsync();
-                    tasks.Add(Task.Run(async () =>
+                    // Update every 0.5s or on completion
+                    if ((now - lastReportTime).TotalSeconds > 0.5 || totalRead == blobLength)
                     {
-                        try
-                        {
-                            var options = new Azure.Storage.Blobs.Models.BlobDownloadOptions
-                            {
-                                Range = new Azure.HttpRange(offset, length)
-                            };
-                            var downloadResponse = await blobClient.DownloadStreamingAsync(options);
-                            using (var chunkStream = downloadResponse.Value.Content)
-                            {
-                                byte[] buffer = new byte[81920];
-                                int read;
-                                long chunkRead = 0;
-                                while ((read = await chunkStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                                {
-                                    lock (fileLock)
-                                    {
-                                        fs.Seek(offset + chunkRead, SeekOrigin.Begin);
-                                        fs.Write(buffer, 0, read);
-                                    }
-                                    chunkRead += read;
-                                    progress[chunkIndex] = chunkRead;
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            throttler.Release();
-                        }
-                    }));
+                        Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | {percent:F2}% | Speed: {speed:F2} MB/s | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   ");
+                        lastReportTime = now;
+                        lastReportBytes = totalRead;
+                    }
                 }
-
-                await Task.WhenAll(tasks);
             }
-
-            await Task.WhenAll(tasks);
-            // Print final status line (100%) before exiting
-            long finalDownloaded = new FileInfo(localPath).Length;
-            var elapsed = DateTime.UtcNow - startTime;
-            string downloadedStr = FormatBytes(finalDownloaded);
-            string totalStr = FormatBytes(blobLength);
-            string etaStr = "00:00:00";
-            Console.Write($"\rDownloaded: {downloadedStr}/{totalStr} | 100.00% | Speed: N/A | Threads: {threads} | Elapsed: {elapsed:hh\\:mm\\:ss} | ETA: {etaStr}   \n");
-            Console.WriteLine("Download complete.");
-            // Restore normal sleep behavior
-            _ = SetThreadExecutionState(ES_CONTINUOUS);
+            Console.WriteLine("\nDownload complete.");
         }
     }
 }
